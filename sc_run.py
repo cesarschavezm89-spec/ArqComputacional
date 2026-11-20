@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""Compilen y corran los testbenches de core_min2 con SiliconCompiler,
+"""Compilen y corran los testbenches de core_full con SiliconCompiler,
 usando Verilator como motor de simulacion y generando una onda .fst
 para verla con Surfer.
 
-core_min2 extiende core_min hasta branches y saltos, en 3 bloques,
-cada uno con su propio testbench y programa .hex:
+core_full es el nucleo RV32I base completo (34 instrucciones con
+semantica real, mas fence/ecall/ebreak decodificadas como no-op), en
+6 bloques, cada uno con su propio testbench y programa .hex:
 
     alu     - ALU completa (R-type + I-type, 19 operaciones)
     branch  - los 6 branches (beq/bne/blt/bge/bltu/bgeu), taken+not-taken
-    jump    - jal/jalr (llamada+retorno, salto hacia atras) (default)
-
-Loads/stores, lui/auipc y el resto de RV32I quedan para mas adelante.
+    jump    - jal/jalr (llamada+retorno, salto hacia atras)
+    upper   - lui/auipc + el idioma lui+addi de 32 bits
+    mem     - loads/stores (byte/half/word, little-endian)
+    full    - capstone: suma un arreglo de enteros en memoria (default)
 
 Uso:
-    python3 sc_run.py                 - compila y corre el bloque de saltos (jump)
+    python3 sc_run.py                 - compila y corre el capstone (full)
     python3 sc_run.py --tb alu        - corre el bloque indicado
-    python3 sc_run.py --tb branch --wave - igual, y ademas abre la onda en Surfer
-    python3 sc_run.py --view          - abre la onda incluida del bloque (--tb), sin simular
+    python3 sc_run.py --tb mem --wave - igual, y ademas abre la onda en Surfer
+    python3 sc_run.py --view          - abre el waveform.fst incluido, sin simular
 """
 import argparse
 import os
@@ -39,31 +41,36 @@ VERILATOR_WARNINGS_OFF = [
 
 COMMON_FILES = [
     "risc_v_32_i_pkg.sv", "ArithmeticLogicUnit.sv", "ImmediateSignExtend.sv",
-    "RegisterFile.sv", "ComparatorUnit.sv",
-    "CoreControlUnit_min2.sv", "InstructionMemory_min2.sv", "ProcessorCoreMin2.sv",
+    "RegisterFile.sv", "ComparatorUnit.sv", "LoadAndStoreUnit.sv",
+    "CoreControlUnit_full.sv", "InstructionMemory_full.sv", "ProcessorCoreFull.sv",
 ]
+DMEM_FILE = "DataMemory_full.sv"
 
-# block name -> top module
+# block name -> (top module, needs DataMemory_full?)
 BLOCKS = {
-    "alu":    "core_min2_alu_tb",
-    "branch": "core_min2_branch_tb",
-    "jump":   "core_min2_jump_tb",
+    "alu":    ("core_full_alu_tb",    False),
+    "branch": ("core_full_branch_tb", False),
+    "jump":   ("core_full_jump_tb",   False),
+    "upper":  ("core_full_upper_tb",  False),
+    "mem":    ("core_full_mem_tb",    True),
+    "full":   ("core_full_tb",        True),
 }
 
 
-class CoreMin2Design(Design):
-    """core_min2: ALU completa + branches + jumps (sin memoria de datos
-    ni lui/auipc todavia)."""
+class CoreFullDesign(Design):
+    """core_full: RV32I base completo (fence/ecall/ebreak como no-op)."""
 
-    def __init__(self, topmodule):
+    def __init__(self, topmodule, use_dmem):
         super().__init__()
-        self.set_name("core_min2")
-        self.set_dataroot("core_min2", HERE)
-        with self.active_dataroot("core_min2"):
+        self.set_name("core_full")
+        self.set_dataroot("core_full", HERE)
+        with self.active_dataroot("core_full"):
             with self.active_fileset("rtl"):
                 self.set_topmodule(topmodule)
                 for f in COMMON_FILES:
                     self.add_file(f)
+                if use_dmem:
+                    self.add_file(DMEM_FILE)
             with self.active_fileset("testbench.verilator.v"):
                 self.set_topmodule(topmodule)
                 self.add_file(f"{topmodule}.sv")
@@ -82,7 +89,7 @@ def _configure_verilator_task(project):
 
 def _run_executable(vexe_path):
     """Corre el .vexe con cwd=HERE, igual que los targets de make (`cd
-    core_min2 && ...`), para que $readmemh encuentre los .hex por su
+    core_full && ...`), para que $readmemh encuentre los .hex por su
     ruta relativa. Sin esto, SiliconCompiler corre el binario desde su
     propio directorio de build y $readmemh truena con 'file not found'."""
     result = subprocess.run([vexe_path], cwd=HERE, capture_output=True, text=True)
@@ -94,24 +101,24 @@ def _run_executable(vexe_path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--tb", choices=sorted(BLOCKS), default="jump", help="bloque a correr (default: jump)")
+    parser.add_argument("--tb", choices=sorted(BLOCKS), default="full", help="bloque a correr (default: full)")
     parser.add_argument("--wave", action="store_true", help="abrir la onda en Surfer al terminar")
     parser.add_argument("--view", action="store_true",
-                        help="abrir la onda incluida del bloque (--tb), sin simular")
+                        help="abrir el waveform.fst incluido, sin simular")
     args = parser.parse_args()
 
     if args.view:
-        subprocess.call(["surfer", os.path.join(HERE, f"waveform_{args.tb}.fst")])
+        subprocess.call(["surfer", os.path.join(HERE, "waveform.fst")])
         return
 
-    topmodule = BLOCKS[args.tb]
+    topmodule, use_dmem = BLOCKS[args.tb]
 
     project = Sim()
-    project.set_design(CoreMin2Design(topmodule))
+    project.set_design(CoreFullDesign(topmodule, use_dmem))
     project.add_fileset("testbench.verilator.v")
     project.add_fileset("rtl")
 
-    flow = Flowgraph(f"core_min2_{args.tb}_sim")
+    flow = Flowgraph(f"core_full_{args.tb}_sim")
     flow.node("compile", verilator_compile.CompileTask())
     project.set_flow(flow)
 

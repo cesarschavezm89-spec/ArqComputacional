@@ -1,5 +1,5 @@
 /***************************************************************************
-* Material didactico: core_min2 (ALU completa + branches + jumps)
+* Material didactico: core_full (RV32I base completo)
 * Module: ComparatorUnit.sv
 *
 * Unidad de comparacion: produce un solo bit de salida (comp_o) a partir
