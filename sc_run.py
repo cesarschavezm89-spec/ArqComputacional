@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """Compilen y corran el testbench de esta carpeta con SiliconCompiler,
-usando Verilator como motor de simulacion y generando una onda para
-verla con Surfer.
+usando Verilator como motor de simulacion y generando una onda .fst
+para verla con Surfer.
 
-alu8.v y alu8_tb.v son Verilog puro (sin SystemVerilog), por lo que
-este script valida lo mismo que exige Silicluster v3.
+Corran core_min_tb: el nucleo RV32I minimo (ProcessorCoreMin) que
+ejecuta add/sub/addi de principio a fin.
 
 Uso:
-    python3 sc_run.py            - compila y corre alu8_tb, reporta PASS/FAIL
+    python3 sc_run.py            - compila y corre core_min_tb
     python3 sc_run.py --wave     - igual, y ademas abre la onda en Surfer
-    python3 sc_run.py --view     - abre el waveform.vcd incluido, sin simular
+    python3 sc_run.py --view     - abre el waveform.fst incluido, sin simular
 """
 import argparse
 import os
+import re
 import subprocess
+import sys
 
 from siliconcompiler import Design, Sim, Flowgraph
 from siliconcompiler.tools.verilator import compile as verilator_compile
 from siliconcompiler.tools.verilator.compile import CompileTask
-from siliconcompiler.tools.execute.exec_input import ExecInputTask
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -32,23 +33,30 @@ VERILATOR_WARNINGS_OFF = [
     "-Wno-UNOPTFLAT", "-Wno-TIMESCALEMOD", "-Wno-IEEEMAYDEPRECATE", "-Wno-LATCH",
 ]
 
-TOPMODULE = "alu8_tb"
+TOPMODULE = "core_min_tb"
 
 
-class Alu8Design(Design):
-    """ALU de 8 bits (alu8.v) + su testbench (alu8_tb.v), en Verilog puro."""
+class CoreMinDesign(Design):
+    """Nucleo RV32I minimo: ALU, control, inmediato, banco de registros,
+    memoria de instrucciones y el datapath que los conecta."""
 
     def __init__(self):
         super().__init__()
-        self.set_name("alu8")
-        self.set_dataroot("alu8", HERE)
-        with self.active_dataroot("alu8"):
+        self.set_name("core_min")
+        self.set_dataroot("core_min", HERE)
+        with self.active_dataroot("core_min"):
             with self.active_fileset("rtl"):
-                self.set_topmodule("alu8")
-                self.add_file("alu8.v")
+                self.set_topmodule("ProcessorCoreMin")
+                self.add_file("risc_v_32_i_pkg.sv")
+                self.add_file("ArithmeticLogicUnit.sv")
+                self.add_file("ImmediateSignExtend.sv")
+                self.add_file("RegisterFile.sv")
+                self.add_file("CoreControlUnit_min.sv")
+                self.add_file("InstructionMemory_min.sv")
+                self.add_file("ProcessorCoreMin.sv")
             with self.active_fileset("testbench.verilator.v"):
                 self.set_topmodule(TOPMODULE)
-                self.add_file("alu8_tb.v")
+                self.add_file("core_min_tb.sv")
 
 
 def _configure_verilator_task(project):
@@ -62,26 +70,36 @@ def _configure_verilator_task(project):
             break
 
 
+def _run_executable(vexe_path):
+    """Corre el .vexe con cwd=HERE, igual que el target de make (`cd
+    core_min && ...`), para que $readmemh encuentre el .hex por su
+    ruta relativa. Sin esto, SiliconCompiler corre el binario desde su
+    propio directorio de build y $readmemh truena con 'file not found'."""
+    result = subprocess.run([vexe_path], cwd=HERE, capture_output=True, text=True)
+    print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return re.search(r"^FAIL:", result.stdout, re.MULTILINE) is None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wave", action="store_true", help="abrir la onda en Surfer al terminar")
     parser.add_argument("--view", action="store_true",
-                        help="abrir el waveform.vcd incluido, sin simular")
+                        help="abrir el waveform.fst incluido, sin simular")
     args = parser.parse_args()
 
     if args.view:
-        subprocess.call(["surfer", os.path.join(HERE, "waveform.vcd")])
+        subprocess.call(["surfer", os.path.join(HERE, "waveform.fst")])
         return
 
     project = Sim()
-    project.set_design(Alu8Design())
+    project.set_design(CoreMinDesign())
     project.add_fileset("testbench.verilator.v")
     project.add_fileset("rtl")
 
-    flow = Flowgraph("alu8_sim")
+    flow = Flowgraph("core_min_sim")
     flow.node("compile", verilator_compile.CompileTask())
-    flow.node("simulate", ExecInputTask())
-    flow.edge("compile", "simulate")
     project.set_flow(flow)
 
     _configure_verilator_task(project)
@@ -89,13 +107,18 @@ def main():
     project.run()
     project.summary()
 
+    vexe = project.find_result(step="compile", index="0", directory="outputs",
+                               filename=f"{TOPMODULE}.vexe")
+    passed = _run_executable(vexe)
+
     if args.wave:
-        vcd = project.find_result(step="simulate", index="0", directory=".",
-                                  filename=f"{TOPMODULE}.vcd")
-        if vcd:
-            project.show(vcd)
+        fst = os.path.join(HERE, f"{TOPMODULE}.fst")
+        if os.path.exists(fst):
+            project.show(fst)
         else:
-            print(f"No se encontro la onda {TOPMODULE}.vcd")
+            print(f"No se encontro la onda {TOPMODULE}.fst")
+
+    sys.exit(0 if passed else 1)
 
 
 if __name__ == "__main__":
